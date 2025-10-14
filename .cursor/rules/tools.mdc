@@ -1,0 +1,338 @@
+# Tool Integration Guide
+
+## Overview
+
+This platform integrates 20+ external security tools for comprehensive subdomain enumeration and reconnaissance. Each tool is wrapped with a standardized interface for consistent error handling, timeout management, and output parsing.
+
+## Installation
+
+### Automated Installation
+
+```bash
+# Call the API endpoint to install all tools
+curl -X POST http://localhost:8000/api/tools/install
+
+# Check tool status
+curl http://localhost:8000/api/tools/status
+```
+
+### Manual Installation
+
+#### Prerequisites
+
+1. **Go** (required for Go-based tools)
+```bash
+# Install Go 1.19+
+wget https://go.dev/dl/go1.21.0.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
+export GOPATH=$HOME/go
+export PATH=$PATH:$GOPATH/bin
+```
+
+2. **Git** (required for cloning repositories)
+3. **Python 3.12+** (for Python-based tools)
+4. **Make** (for building MassDNS)
+
+## Integrated Tools
+
+### Horizontal Enumeration
+
+#### 1. WhoIsXMLAPI
+- **Purpose**: Company acquisition discovery
+- **Type**: API Service
+- **Installation**: API key required
+- **Configuration**: Store API key via `/api/config/api-keys/whoisxml`
+
+#### 2. bgp.he.net
+- **Purpose**: ASN lookup and IP range enumeration
+- **Type**: Web scraping
+- **Installation**: No installation required
+- **Rate Limit**: Respect site rate limits
+
+#### 3. Mapcidr
+- **Purpose**: Expand IP CIDR ranges
+- **Type**: Go binary
+- **Installation**: `go install github.com/projectdiscovery/mapcidr/cmd/mapcidr@latest`
+- **Usage**: Expands CIDR notation to individual IPs
+
+#### 4. Dnsx
+- **Purpose**: Fast DNS resolver and PTR lookup
+- **Type**: Go binary
+- **Installation**: `go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest`
+- **Usage**: Bulk DNS resolution and PTR queries
+
+#### 5. favUp.py
+- **Purpose**: Favicon hash generation for technology fingerprinting
+- **Type**: Python script
+- **Installation**: `git clone https://github.com/pielco11/fav-up.git`
+- **Dependencies**: `pip install mmh3 requests beautifulsoup4`
+
+### Passive Enumeration Tools
+
+#### 6. Subfinder
+- **Purpose**: Passive subdomain enumeration using multiple sources
+- **Type**: Go binary
+- **Installation**: `go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest`
+- **Configuration**: API keys in `~/.config/subfinder/provider-config.yaml`
+- **Sources**: VirusTotal, Shodan, Censys, SecurityTrails, etc.
+
+#### 7. Assetfinder
+- **Purpose**: Find domains and subdomains
+- **Type**: Go binary
+- **Installation**: `go install github.com/tomnomnom/assetfinder@latest`
+- **Output**: One subdomain per line
+
+#### 8. Amass
+- **Purpose**: Advanced subdomain enumeration
+- **Type**: Go binary / Snap package
+- **Installation**: `snap install amass` or build from source
+- **Modes**: passive, active (we use passive)
+
+#### 9. Certificate Transparency Logs
+- **crt.sh**: No API key required, JSON output
+- **tls.bufferover.run**: API key required
+- **Censys**: API ID and secret required
+
+### Active Enumeration Tools
+
+#### 10. MassDNS
+- **Purpose**: High-performance DNS resolution
+- **Type**: C binary
+- **Installation**:
+```bash
+git clone https://github.com/blechschmidt/massdns.git
+cd massdns
+make
+# Binary at bin/massdns
+```
+- **Dependency**: Required by PureDNS
+
+#### 11. PureDNS
+- **Purpose**: Fast domain resolution with wildcard filtering
+- **Type**: Go binary
+- **Installation**: `go install github.com/d3mondev/puredns/v2@latest`
+- **Requires**: MassDNS, resolvers list
+- **Resolvers**: Download from `https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt`
+
+#### 12. GoTator
+- **Purpose**: Generate subdomain permutations
+- **Type**: Go binary
+- **Installation**: `go install github.com/Josue87/gotator@latest`
+- **Usage**: Creates variations based on patterns
+
+#### 13. Gospider
+- **Purpose**: Fast web spider for crawling
+- **Type**: Go binary
+- **Installation**: `go install github.com/jaeles-project/gospider@latest`
+- **Usage**: Extract URLs from web pages
+
+#### 14. Unfurl
+- **Purpose**: Extract and normalize URLs
+- **Type**: Go binary
+- **Installation**: `go install github.com/tomnomnom/unfurl@latest`
+- **Usage**: Parse and filter URLs by component
+
+#### 15. SecretFinder
+- **Purpose**: Extract secrets and domains from JavaScript
+- **Type**: Python script
+- **Installation**: `git clone https://github.com/m4ll0k/SecretFinder.git`
+- **Dependencies**: `pip install -r requirements.txt`
+
+#### 16. HostHunter
+- **Purpose**: VHOST discovery
+- **Type**: Python script
+- **Installation**: `git clone https://github.com/SpiderLabs/HostHunter.git`
+- **Usage**: Discover virtual hosts
+
+#### 17. Gobuster
+- **Purpose**: Directory/DNS/VHOST brute-forcing
+- **Type**: Go binary
+- **Installation**: `go install github.com/OJ/gobuster/v3@latest`
+- **Modes**: dir, dns, vhost
+
+#### 18. analyticsRelationships
+- **Purpose**: Find related domains via Google Analytics
+- **Type**: Go binary
+- **Installation**: Build from source (GoLang version)
+- **Usage**: Track GA code relationships
+
+#### 19. Cero
+- **Purpose**: TLS/SSL certificate enumeration
+- **Type**: Go binary
+- **Installation**: Build from source
+- **Usage**: Extract subdomains from certificates
+
+#### 20. Anew
+- **Purpose**: Add new lines to files (deduplication)
+- **Type**: Go binary
+- **Installation**: `go install github.com/tomnomnom/anew@latest`
+- **Usage**: Filter out duplicate results
+
+### Web Probing Tools
+
+#### 21. Naabu
+- **Purpose**: Fast port scanner
+- **Type**: Go binary
+- **Installation**: `go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest`
+- **Features**: SYN scanning, JSON output, rate limiting
+
+#### 22. Httpx
+- **Purpose**: HTTP probing and technology detection
+- **Type**: Go binary
+- **Installation**: `go install github.com/projectdiscovery/httpx/cmd/httpx@latest`
+- **Features**: Status codes, titles, tech detection, screenshots
+
+#### 23. Nmap
+- **Purpose**: Comprehensive port scanning and service detection
+- **Type**: System package
+- **Installation**: `apt install nmap` or `yum install nmap`
+- **Usage**: Service fingerprinting, version detection
+
+### Additional Tools
+
+#### 24. GAU (GetAllUrls)
+- **Purpose**: Fetch known URLs from AlienVault, Wayback Machine
+- **Type**: Go binary
+- **Installation**: `go install github.com/lc/gau/v2/cmd/gau@latest`
+
+#### 25. Waybackurls
+- **Purpose**: Fetch URLs from Wayback Machine
+- **Type**: Go binary
+- **Installation**: `go install github.com/tomnomnom/waybackurls@latest`
+
+#### 26. github-subdomains
+- **Purpose**: Find subdomains from GitHub
+- **Type**: Go binary
+- **Installation**: `go install github.com/gwen001/github-subdomains@latest`
+- **Requires**: GitHub token
+
+#### 27. gitlab-subdomains
+- **Purpose**: Find subdomains from GitLab
+- **Type**: Go binary
+- **Installation**: `go install github.com/gwen001/gitlab-subdomains@latest`
+
+## Wordlists
+
+### n0kovo_subdomains_huge.txt
+- **Size**: ~3 million entries
+- **Source**: https://github.com/n0kovo/n0kovo_subdomains
+- **Download**: `https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_huge.txt`
+- **Usage**: DNS brute-forcing with PureDNS
+- **Attribution**: Required in production deployments
+
+### Resolvers List
+- **Source**: Trickest resolvers
+- **Download**: `https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt`
+- **Size**: ~1000 public DNS resolvers
+- **Usage**: DNS resolution with PureDNS and Dnsx
+
+## Configuration
+
+### API Keys
+
+Store API keys securely using the platform's encrypted storage:
+
+```bash
+# WhoIsXMLAPI
+curl -X POST http://localhost:8000/api/config/api-keys/whoisxml \
+  -H "Content-Type: application/json" \
+  -d '{"api_key": "your-key-here"}'
+
+# Censys
+curl -X POST http://localhost:8000/api/config/api-keys/censys_api_id \
+  -d '{"api_key": "your-api-id"}'
+curl -X POST http://localhost:8000/api/config/api-keys/censys_api_secret \
+  -d '{"api_key": "your-api-secret"}'
+
+# BufferOver
+curl -X POST http://localhost:8000/api/config/api-keys/bufferover \
+  -d '{"api_key": "your-key"}'
+```
+
+### Environment Variables
+
+```bash
+# Tools directory
+export TOOLS_DIRECTORY="./tools"
+
+# Scan profile
+export SCAN_PROFILE="normal"  # passive, normal, aggressive
+
+# Rate limiting
+export GLOBAL_RATE_LIMIT=10
+export DOMAIN_RATE_LIMIT=5
+
+# Recursion
+export ENABLE_RECURSION=false
+export RECURSION_DEPTH=2
+```
+
+## Output Formats
+
+### Standardized Output
+
+All tools are wrapped to produce standardized output:
+
+```json
+{
+  "success": true,
+  "output": "raw tool output",
+  "error": "",
+  "return_code": 0,
+  "results": ["subdomain1.example.com", "subdomain2.example.com"],
+  "metadata": {}
+}
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Tool not found in PATH**
+   - Ensure Go binaries are in `$GOPATH/bin`
+   - Add to PATH: `export PATH=$PATH:$GOPATH/bin`
+
+2. **Permission denied**
+   - Some tools require root for SYN scanning
+   - Grant capabilities: `sudo setcap cap_net_raw+ep $(which naabu)`
+
+3. **Rate limiting errors**
+   - Adjust scan profile to "passive" or "normal"
+   - Increase delays between requests
+
+4. **Timeout errors**
+   - Increase timeout in tool wrapper
+   - Check network connectivity
+   - Verify target is accessible
+
+## Performance Tuning
+
+### PureDNS Parameters
+
+```bash
+# Rate limiting
+-l 10000  # 10,000 queries per second
+
+# Wildcard detection
+--wildcard-batch 1000000  # Batch size for wildcard testing
+```
+
+### Naabu Parameters
+
+```bash
+# Rate limiting
+-rate 1000  # Packets per second
+
+# Retries
+-retries 3
+```
+
+## License and Attribution
+
+All integrated tools are open-source and subject to their respective licenses:
+- Most Go tools: MIT or Apache 2.0
+- Python tools: Various (see individual repos)
+- Wordlists: Public domain or CC0
+
+**Important**: Always review and comply with tool licenses in production deployments.

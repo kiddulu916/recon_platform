@@ -1,0 +1,789 @@
+# Security Reconnaissance Platform - Architecture Documentation
+
+## Overview
+
+The Security Reconnaissance Platform is a comprehensive subdomain enumeration and vulnerability discovery system built on a modular, async-first architecture. It integrates 20+ external security tools with intelligent orchestration, deduplication, and database persistence.
+
+## Architecture Principles
+
+1. **Tool-First Approach**: Leverage battle-tested security tools rather than reimplementing
+2. **Async Orchestration**: Tools run in subprocesses, coordinated via asyncio
+3. **Modular Phases**: Each enumeration phase is independent and reusable
+4. **Database-Centric**: Results persisted immediately for crash recovery
+5. **Graceful Degradation**: Missing tools logged, workflow continues with available tools
+
+## System Components
+
+### Core Layer
+
+```
+app/core/
+├── config.py          # Configuration management (SecurityConfig, DatabaseConfig, ScannerConfig, ToolsConfig)
+├── database.py        # Async database connection management
+├── logging.py         # Structured logging with structlog
+└── security.py        # Authentication and encryption
+```
+
+### Data Layer
+
+```
+app/models/
+├── domain.py          # Domain, Subdomain, FaviconHash
+├── network.py         # ASN, IPAddress, Port, SubdomainIP
+├── company.py         # Company, CompanyAcquisition
+├── http_traffic.py    # HTTPTraffic, APIEndpoint
+├── vulnerability.py   # Vulnerability tracking
+└── scan.py           # ScanJob tracking
+```
+
+### Scanner Layer
+
+```
+app/scanner/
+├── engine.py                    # Main scanner engine orchestrator
+├── job_manager.py              # Scan job lifecycle management
+├── rate_limiter.py             # Token bucket rate limiting
+├── dedup.py                    # Bloom filter deduplication
+├── tools/
+│   ├── installer.py            # Tool installation and verification
+│   └── base.py                 # ToolWrapper abstract base class
+├── horizontal/
+│   ├── acquisitions.py         # Company acquisition discovery
+│   ├── asn_lookup.py           # ASN and IP range enumeration
+│   ├── reverse_dns.py          # PTR record enumeration
+│   └── favicon_hash.py         # Favicon-based tech fingerprinting
+├── vertical/
+│   ├── passive/
+│   │   ├── subfinder.py        # Subfinder wrapper
+│   │   ├── assetfinder.py      # Assetfinder wrapper
+│   │   ├── amass.py            # Amass passive wrapper
+│   │   └── ct_logs.py          # Certificate Transparency scanner
+│   └── active/
+│       ├── dns_bruteforce.py   # PureDNS brute-forcing
+│       └── permutations.py     # GoTator permutation generation
+└── probing/
+    ├── port_scanner.py         # Naabu/Nmap port scanning
+    └── http_prober.py          # Httpx HTTP probing
+```
+
+## Scan Workflow
+
+### Complete Workflow Phases
+
+```
+1. Horizontal Enumeration
+   ├── Acquisition Discovery (WhoIsXMLAPI)
+   ├── ASN Lookup (bgp.he.net)
+   ├── Reverse DNS (Mapcidr + Dnsx)
+   └── Favicon Hashing (favUp.py)
+
+2. Vertical Passive Enumeration
+   ├── Subfinder
+   ├── Assetfinder
+   ├── Amass (passive)
+   └── Certificate Transparency Logs
+       ├── crt.sh
+       ├── tls.bufferover.run
+       └── Censys
+
+3. Vertical Active Enumeration
+   ├── DNS Brute-forcing (PureDNS + n0kovo_subdomains_huge.txt)
+   ├── Permutations (GoTator + PureDNS)
+   ├── JS/Source Code Scraping (Gospider + httpx + secretfinder)
+   ├── VHOST Discovery (HostHunter + gobuster)
+   ├── Google Analytics (analyticsRelationships)
+   └── TLS/CSP/CNAME Probing (cero + httpx + dnsx)
+
+4. Web Probing
+   ├── Port Scanning (naabu + nmap)
+   └── HTTP Probing (httpx)
+
+5. Recursive Enumeration (optional)
+   └── Repeat workflow on newly discovered subdomains
+```
+
+## Data Flow
+
+```
+Target Domain
+    ↓
+[Horizontal Enumeration]
+    ├→ Company/Acquisitions → Database
+    ├→ ASN/IP Ranges → Database
+    ├→ Reverse DNS Subdomains → Dedup → Database
+    └→ Favicon Hashes → Database
+    ↓
+[Passive Enumeration]
+    ├→ Multiple Tools (parallel)
+    ├→ Aggregate Results
+    ├→ Deduplication
+    └→ Database Persistence
+    ↓
+[Active Enumeration]
+    ├→ DNS Brute-force
+    ├→ Permutations
+    ├→ Aggregate Results
+    ├→ Deduplication
+    └→ Database Persistence
+    ↓
+[Web Probing]
+    ├→ Port Scanning
+    ├→ HTTP Probing
+    ├→ Technology Detection
+    └→ HTTP Traffic Logging
+    ↓
+[Recursive Enumeration] (if enabled)
+    └→ Repeat on new subdomains
+    ↓
+[Results]
+```
+
+## Deduplication Strategy
+
+### Multi-Level Deduplication with Database Initialization
+
+1. **Bloom Filter (In-Memory with Persistence)**
+   - Fast O(1) lookups
+   - ~0.1% false positive rate
+   - Tracks: subdomains, IPs, URLs
+   - **NEW**: Initialized from database before each scan
+   - Loads existing subdomains for target domain on scan start
+   - Prevents duplicate insert attempts
+   - Idempotent initialization (skips if already initialized for domain)
+
+2. **Database Upsert Pattern**
+   - **NEW**: Insert-or-update semantics instead of insert-only
+   - Handles IntegrityError gracefully with automatic fallback to update
+   - Merges discovery_sources when subdomain already exists
+   - Updates recursion_level if deeper path found
+   - Returns status: new (True), updated (False), or failed (None)
+   - Tracks counts: new_count, updated_count, failed_count
+
+3. **Source Tracking**
+   - Each subdomain tracks all discovery sources
+   - Sources are merged on re-discovery (JSON array union)
+   - Enables confidence scoring
+   - Useful for debugging tool effectiveness
+
+### Deduplication Workflow
+
+```
+Scan Start
+    ↓
+[Initialize DeduplicationManager]
+    ↓
+Load existing subdomains from DB → Bloom Filter
+Load existing IPs from DB → Bloom Filter
+    ↓
+[Enumeration Phases]
+    ↓
+Check Bloom Filter (fast)
+    ↓
+If NOT in Bloom Filter:
+    Try INSERT
+    If IntegrityError:
+        Query existing record
+        Merge discovery_sources
+        UPDATE record
+        Return False (updated)
+    Else:
+        Return True (new)
+Else:
+    Skip (duplicate)
+```
+
+## Rate Limiting
+
+### Token Bucket Algorithm
+
+```python
+# Global rate limit (applies to all requests)
+Global Bucket: 10 tokens/second (normal profile)
+
+# Per-domain rate limit
+Domain Bucket: 5 tokens/second per domain
+
+# Per-tool rate limit (optional)
+Tool Bucket: Custom limits per tool
+```
+
+### Scan Profiles
+
+| Profile    | Global Rate | Domain Rate | Description                    |
+|------------|-------------|-------------|--------------------------------|
+| passive    | 1 req/s     | 0.5 req/s   | No direct target interaction   |
+| normal     | 10 req/s    | 5 req/s     | Balanced scanning              |
+| aggressive | 50 req/s    | 20 req/s    | Fast scanning for authorized tests |
+
+## Error Handling and Session Management
+
+### Graceful Degradation
+
+1. **Tool Unavailable**: Skip tool, log warning, continue with other tools
+2. **Tool Timeout**: Log error, mark as failed, continue workflow
+3. **API Rate Limit**: Backoff and retry with exponential delay
+4. **Network Error**: Retry with exponential backoff (max 3 attempts)
+
+### Error Tracking
+
+- All errors logged to `ScanJob.errors` (JSON array)
+- Warnings logged to `ScanJob.warnings`
+- Progress continues despite individual tool failures
+
+### Database Session Management
+
+**Improved Context Manager** (`DatabaseManager.get_session()`):
+- Checks session state before committing
+- Prevents `PendingRollbackError` by verifying session is active
+- Handles nested transaction scenarios
+- Logs rollback events for debugging
+- Always closes session even on error
+
+**Session Lifecycle**:
+```python
+async with db_manager.get_session() as session:
+    # 1. Session created
+    yield session
+    
+    # 2. Check if session is active
+    if session.is_active and session.in_transaction():
+        await session.commit()  # Safe to commit
+    elif session.is_active:
+        pass  # No transaction, skip commit
+    else:
+        # Session already rolled back by error handler
+        log warning, skip commit
+    
+    # 3. Exception handling
+    except Exception:
+        if session.is_active:
+            await session.rollback()  # Rollback if needed
+        raise
+    
+    # 4. Always close session
+    finally:
+        await session.close()
+```
+
+### Per-Phase Transaction Boundaries
+
+**Problem**: Single transaction for entire scan job causes cascade failures
+
+**Solution**: Each phase uses independent session and transaction
+
+**Implementation**:
+```python
+# Old (single transaction for entire job)
+async with db_manager.get_session() as session:
+    phase_1(session)  # If fails, everything rolls back
+    phase_2(session)
+    phase_3(session)
+    await session.commit()  # All-or-nothing
+
+# New (independent transactions per phase)
+phase_1_results = await _run_phase("phase_1", lambda s: phase_1(s))
+phase_2_results = await _run_phase("phase_2", lambda s: phase_2(s))
+phase_3_results = await _run_phase("phase_3", lambda s: phase_3(s))
+
+# Each _run_phase uses its own session:
+async with db_manager.get_session() as session:
+    result = await phase_func(session)
+    # Commits automatically on success
+    # Rolls back on error, but other phases unaffected
+```
+
+### Error Recovery Strategy
+
+**Partial Completion Support**:
+- Job status can be "completed", "partial", or "failed"
+- "partial" = some phases succeeded, some failed
+- Each phase error tracked independently
+- Successful phases save their results
+- Failed phases don't affect successful ones
+
+**Per-Phase Error Handling**:
+```python
+async def _run_phase(phase_name, phase_func, error_list):
+    try:
+        # Update job status
+        async with db.get_session() as session:
+            job.current_phase = phase_name
+        
+        # Execute phase with its own session
+        async with db.get_session() as session:
+            result = await phase_func(session)
+        
+        return result
+    
+    except Exception as e:
+        # Log error, but don't crash job
+        error_list.append(f"{phase_name}: {str(e)}")
+        return None  # Allow job to continue
+```
+
+**Benefits**:
+- Re-scanning existing domains works correctly
+- Partial results are always saved
+- Transient failures don't lose all progress
+- Easier to debug (phase-specific errors)
+- Better user experience (partial completion vs total failure)
+
+## Scan Job Lifecycle
+
+```
+pending → running → completed
+                 ↘ failed
+                 ↘ cancelled
+
+States:
+- pending: Job created, waiting to start
+- running: Job actively executing
+- completed: Job finished successfully
+- failed: Job encountered fatal error
+- cancelled: Job manually cancelled by user
+```
+
+## Database Schema Relationships
+
+```
+Company
+  └─ has many → Domain
+                  └─ has many → Subdomain
+                                  ├─ has many → FaviconHash
+                                  ├─ has many → HTTPTraffic
+                                  └─ belongs to many → IPAddress
+                                                         ├─ belongs to → ASN
+                                                         └─ has many → Port
+
+ScanJob
+  └─ belongs to → Domain
+```
+
+## Phase 3: HTTP Traffic Interception and Analysis System
+
+### Overview
+
+Phase 3 implements a sophisticated HTTP/HTTPS traffic interception and analysis system using mitmproxy as its foundation. This system captures, analyzes, and stores all HTTP traffic with context-aware tagging and real-time vulnerability detection.
+
+### Architecture Components
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Scanner Modules                          │
+│  (HTTP Prober, JS Scraping, VHOST Discovery, etc.)        │
+└───────────────────┬────────────────────────────────────────┘
+                    │ HTTP Requests
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│                mitmproxy Interceptor                        │
+│  • SSL/TLS Interception                                     │
+│  • Context Tag Extraction                                   │
+│  • Certificate Analysis                                     │
+└───────────┬──────────────────────────┬─────────────────────┘
+            │                          │
+            ↓ Immediate               ↓ Real-Time
+    ┌──────────────┐          ┌────────────────┐
+    │  WAL Writer  │          │ Stream Analyzer│
+    │  (msgpack)   │          │ • Error Detect │
+    └──────┬───────┘          │ • Auth Track   │
+           │                  │ • Vuln Patterns│
+           ↓                  └────────┬───────┘
+    ┌──────────────┐                  │
+    │ WAL Files    │                  ↓
+    │ (Rotating)   │          ┌────────────────┐
+    └──────┬───────┘          │ Alert Manager  │
+           │                  │ • Deduplication│
+           ↓ Background       │ • Webhooks     │
+    ┌──────────────┐          └────────────────┘
+    │  Processor   │
+    │ • Batch Read │
+    │ • Deserialize│
+    └──────┬───────┘
+           │
+           ↓
+    ┌──────────────────────────────────────────┐
+    │      Storage Manager                     │
+    │  • Batch Insert (100/batch)              │
+    │  • Response Compression (gzip)           │
+    │  • Subdomain Linking                     │
+    └───────────────┬──────────────────────────┘
+                    │
+                    ↓
+    ┌──────────────────────────────────────────┐
+    │      Content Analyzers                   │
+    │  • URL Extractor (HTML/JS/JSON/XML)      │
+    │  • API Endpoint Detector (REST/GraphQL)  │
+    │  • Sensitive Data Scanner (secrets/PII)  │
+    └───────────────┬──────────────────────────┘
+                    │
+                    ↓
+    ┌──────────────────────────────────────────┐
+    │      Database (HTTPTraffic)              │
+    │  • Full request/response storage         │
+    │  • Analysis results                      │
+    │  • Extracted URLs and APIs               │
+    │  • Certificate information               │
+    └──────────────────────────────────────────┘
+```
+
+### Component Details
+
+#### 1. mitmproxy Interceptor (`app/scanner/interception/interceptor.py`)
+
+**Purpose**: Hooks into mitmproxy's event system to capture HTTP/HTTPS traffic.
+
+**Key Features**:
+- SSL/TLS certificate interception with validation tracking
+- Context extraction from custom headers (`X-Recon-*`)
+- Request/response pair capture
+- Non-blocking traffic flow
+
+**Hooks**:
+- `request()`: Capture request, extract context
+- `response()`: Capture response, trigger analysis
+- `tls_established()`: Extract certificate details
+- `error()`: Handle connection errors
+
+#### 2. Context Manager (`app/scanner/interception/context_manager.py`)
+
+**Purpose**: Thread-safe context management for tagging HTTP requests.
+
+**Context Information**:
+- `correlation_id`: UUID for request grouping
+- `scan_job_id`: Link to scan job
+- `domain_id`: Target domain
+- `scanner_module`: Originating module (horizontal/passive/active/probing)
+- `scan_purpose`: What the scan is trying to discover
+- `parent_correlation_id`: For request chains (redirects, resources)
+
+**Implementation**: Uses Python's `contextvars` for async-safe context storage.
+
+#### 3. Write-Ahead Log (WAL) System (`app/scanner/interception/wal.py`)
+
+**Purpose**: Immediate, resilient persistence before structured processing.
+
+**Features**:
+- Async file I/O with `aiofiles`
+- msgpack serialization for efficiency
+- Automatic rotation (100MB or 1 hour)
+- Buffer management (1000 entries)
+- Write-ahead guarantee (no data loss)
+
+**File Format**: `wal_YYYYMMDD_HHMMSS_UUID.msgpack`
+
+#### 4. Background Processor (`app/scanner/interception/processor.py`)
+
+**Purpose**: Moves data from WAL to structured database storage.
+
+**Processing Flow**:
+1. Scan WAL directory every 10 seconds
+2. Read oldest unprocessed files
+3. Deserialize msgpack data
+4. Batch process (100 entries/batch)
+5. Store in database via StorageManager
+6. Delete processed WAL files
+
+**Features**:
+- Async queue-based processing
+- Configurable intervals and batch sizes
+- Error handling with retry logic
+- Graceful degradation
+
+#### 5. Storage Manager (`app/scanner/interception/storage_manager.py`)
+
+**Purpose**: Efficient batch insertion into database.
+
+**Features**:
+- Batch inserts (100 records per transaction)
+- Response body compression with gzip
+- Subdomain lookup and linking
+- Transaction management
+- Error tracking
+
+**Compression**:
+- Minimum size: 1KB
+- Maximum body size: 10MB
+- Algorithm: gzip level 6
+
+#### 6. Content Analyzers (`app/scanner/interception/analyzers/`)
+
+##### URL Extractor
+- Extracts URLs from HTML (href, src, action)
+- Parses JavaScript for API calls
+- Finds URLs in JSON responses
+- Handles XML/SOAP endpoints
+- Categorizes URLs (internal, external, API, static)
+
+##### API Endpoint Detector
+- Detects REST APIs (versioning, resource paths)
+- Identifies GraphQL endpoints
+- Recognizes SOAP services
+- Extracts API parameters and schemas
+- Confidence scoring
+
+##### Sensitive Data Scanner
+- Pattern matching for:
+  * API keys (AWS, Google, GitHub, Slack, Stripe)
+  * JWT tokens
+  * Passwords
+  * Credit cards
+  * SSNs
+  * Private keys
+  * Email addresses
+- Entropy analysis for secret detection
+- Context-aware matching to reduce false positives
+
+#### 7. Real-Time Stream Analyzer (`app/scanner/interception/stream_analyzer.py`)
+
+**Purpose**: Non-blocking analysis of traffic as it flows.
+
+**Pattern Matchers**:
+
+**Error Patterns**:
+- Stack traces (Java, Python, PHP, Node.js, .NET)
+- Debug information leakage
+- Framework version disclosure
+
+**Auth Patterns**:
+- Bearer token tracking
+- Basic auth detection
+- API key identification
+- Session cookie management
+
+**Vulnerability Patterns**:
+- SQL injection indicators (database errors)
+- XSS reflection detection
+- SSRF indicators (cloud metadata access)
+- Command injection indicators
+- Path traversal patterns
+
+#### 8. Alert Manager (`app/scanner/interception/alerting.py`)
+
+**Purpose**: Real-time alert generation and delivery.
+
+**Features**:
+- Alert deduplication (60-second cooldown)
+- Severity classification (low, medium, high, critical)
+- Database persistence (`TrafficAlert` model)
+- Optional webhook delivery
+- Rate limiting per alert type
+
+**Alert Flow**:
+1. Pattern matcher detects issue
+2. Generate alert with context
+3. Check deduplication
+4. Store in database
+5. Send webhook notification (if configured)
+
+### Data Models
+
+#### HTTPTraffic (Extended)
+```python
+# Original fields
+id, subdomain_id, method, url, path, query_params
+request_headers, request_body, response_headers, response_body
+status_code, timestamp, scanner_module, scan_purpose
+
+# Phase 3 additions
+certificate_validation_errors      # SSL/TLS validation issues
+certificate_fingerprint            # SHA256 fingerprint
+certificate_issuer, certificate_subject
+correlation_id                     # UUID for request correlation
+parent_traffic_id                  # For redirect/resource chains
+redirect_chain                     # JSON array of redirect URLs
+is_analyzed                        # Background processing flag
+analysis_results                   # JSON of analysis findings
+extracted_urls                     # URLs found in response
+extracted_api_endpoints            # API endpoints discovered
+sensitive_patterns_matched         # Sensitive data findings
+```
+
+#### HTTPTrafficWAL
+```python
+id, wal_id (UUID), timestamp
+raw_data (msgpack)                 # Serialized traffic data
+processed                          # Processing status
+processing_attempts, error_message
+http_traffic_id                    # Link to processed record
+```
+
+#### SensitiveDataPattern
+```python
+id, pattern_name, pattern_regex, pattern_type
+description, severity, false_positive_likelihood
+active, case_sensitive, multiline
+min_entropy, context_required, exclusion_patterns
+created_at, updated_at, matches_count, last_matched
+```
+
+#### TrafficAnalysisRule
+```python
+id, rule_name, rule_type, description
+condition (JSON), action (JSON)
+priority, active
+match_on_request, match_on_response
+max_alerts_per_minute, cooldown_seconds
+created_at, updated_at, matches_count, last_matched
+```
+
+#### TrafficAlert
+```python
+id, http_traffic_id, rule_id, pattern_id
+alert_type, severity, title, description
+matched_content, context (JSON)
+status, reviewed_at, reviewed_by
+created_at
+```
+
+### API Endpoints
+
+#### Proxy Control
+- `POST /api/proxy/start` - Start proxy server
+- `POST /api/proxy/stop` - Stop proxy server
+- `GET /api/proxy/status` - Get status and statistics
+
+#### Traffic Inspection
+- `GET /api/traffic` - List captured traffic (with filters)
+- `GET /api/traffic/{id}` - Get traffic details
+- `GET /api/traffic/analysis` - Get analyzed traffic with findings
+- `POST /api/traffic/reanalyze/{id}` - Re-run analysis
+
+#### Alerts
+- `GET /api/traffic/alerts` - List alerts (with filters)
+
+#### Pattern Management
+- `POST /api/patterns/sensitive` - Create sensitive data pattern
+- `GET /api/patterns/sensitive` - List patterns
+- `POST /api/patterns/analysis` - Create analysis rule
+- `GET /api/patterns/analysis` - List rules
+
+### Configuration
+
+#### ProxyConfig
+```python
+proxy_enabled = False              # Enable/disable proxy
+proxy_host = "0.0.0.0"
+proxy_port = 8080
+
+# WAL settings
+wal_directory = "data/http_wal"
+wal_max_size_mb = 100
+wal_max_age_hours = 1
+wal_buffer_size = 1000
+
+# Processing
+processing_enabled = True
+processing_interval_seconds = 10
+processing_batch_size = 100
+
+# Analysis
+realtime_analysis_enabled = True
+enable_sensitive_data_scanning = True
+enable_vulnerability_patterns = True
+enable_error_detection = True
+
+# Storage
+compress_response_bodies = True
+max_body_size_mb = 10
+
+# Alerting
+enable_alerts = True
+alert_webhook_url = None           # Optional webhook for alerts
+```
+
+### Performance Characteristics
+
+#### Throughput
+- WAL writes: ~10,000 requests/second (buffered)
+- Background processing: ~100 requests/second (batched)
+- Real-time analysis: Non-blocking, <5ms per request
+
+#### Storage
+- Compressed bodies: ~70% size reduction
+- WAL rotation: Automatic at 100MB or 1 hour
+- Database indexes for fast queries
+
+#### Memory
+- WAL buffer: ~10MB (1000 entries)
+- Deduplication tracking: ~1MB per 10,000 alerts
+- Pattern compilation: ~2MB (cached)
+
+### Security Considerations
+
+#### Certificate Management
+- CA certificate auto-generated by mitmproxy
+- Stored in `data/certs/` directory
+- Must be installed in browsers/tools for HTTPS interception
+- Certificate validation errors tracked per connection
+
+#### Data Privacy
+- Sensitive data masked in logs
+- Optional content filtering by type
+- Configurable body size limits
+- Response compression for storage efficiency
+
+#### Rate Limiting
+- Alert deduplication (60-second cooldown)
+- Webhook rate limiting
+- Processing batch limits
+- Analysis timeout (5 seconds)
+
+### Extension Points for Phase 4
+
+1. **AI-Powered Analysis**
+   - ML models for vulnerability classification
+   - Anomaly detection in traffic patterns
+   - Automated exploit generation
+   - False positive reduction
+
+2. **Advanced Vulnerability Detection**
+   - Active fuzzing based on captured traffic
+   - Parameter manipulation testing
+   - Authentication bypass detection
+   - Business logic flaw identification
+
+3. **Correlation Engine**
+   - Cross-request vulnerability chains
+   - Multi-step attack scenarios
+   - User flow analysis
+   - Session management flaws
+
+## Performance Considerations
+
+### Concurrency
+
+- Asyncio-based for I/O-bound operations
+- Subprocess execution for CPU-bound tools
+- Configurable concurrency limits per phase
+
+### Database Optimization
+
+- Batch inserts for large result sets
+- Indexes on frequently queried columns
+- Connection pooling for async operations
+
+### Memory Management
+
+- Bloom filters with configurable capacity
+- Streaming results from tools (no full buffering)
+- Periodic cleanup of old scan jobs
+
+## Security Considerations
+
+### API Key Management
+
+- Encrypted storage using Fernet (symmetric encryption)
+- Master key generated on first run
+- Permissions: 0600 (owner read/write only)
+
+### Rate Limiting
+
+- Prevents overwhelming targets
+- Respects scan profile limits
+- Per-domain and global limits
+
+### Authorization
+
+- Explicit `is_authorized` flag per domain
+- Scan profile enforcement
+- Audit logging of all operations
