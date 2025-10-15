@@ -1,0 +1,127 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database (production only)
+  postgres:
+    image: postgres:16-alpine
+    container_name: recon-postgres
+    environment:
+      POSTGRES_DB: recon
+      POSTGRES_USER: recon
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recon"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - recon-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Backend overrides for production
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    volumes:
+      - tools_bin:/tools/bin:ro
+      - tools_python:/tools/python-tools:ro
+      - backend_data:/app/data
+      - backend_logs:/app/logs
+      - backend_config:/app/config
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://recon:${DB_PASSWORD}@postgres:5432/recon
+      - PYTHONUNBUFFERED=1
+      - SCAN_PROFILE=normal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tools:
+        condition: service_started
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Frontend overrides for production
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+      target: production
+    volumes: []
+    environment:
+      - VITE_API_URL=http://backend:8000
+      - VITE_WS_URL=ws://backend:8000
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Mitmproxy overrides for production
+  mitmproxy:
+    volumes:
+      - mitmproxy_certs:/root/.mitmproxy
+      - mitmproxy_wal:/app/wal
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://recon:${DB_PASSWORD}@postgres:5432/recon
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Tools container production settings
+  tools:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+volumes:
+  postgres_data:
+    name: recon_postgres_data
+  backend_data:
+    name: recon_backend_data
+  backend_logs:
+    name: recon_backend_logs
+  backend_config:
+    name: recon_backend_config
+  mitmproxy_certs:
+    name: recon_mitmproxy_certs
+  mitmproxy_wal:
+    name: recon_mitmproxy_wal
