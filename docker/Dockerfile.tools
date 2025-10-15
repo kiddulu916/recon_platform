@@ -1,0 +1,91 @@
+# Stage 1: Build all tools
+FROM golang:1.21-alpine AS go-builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    git \
+    build-base \
+    make \
+    libpcap-dev \
+    python3 \
+    py3-pip
+
+WORKDIR /build
+
+# Set GOPATH
+ENV GOPATH=/build
+
+# Install Go tools
+RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
+    go install -v github.com/tomnomnom/assetfinder@latest && \
+    go install -v github.com/lc/gau/v2/cmd/gau@latest && \
+    go install -v github.com/tomnomnom/waybackurls@latest && \
+    go install -v github.com/gwen001/github-subdomains@latest && \
+    go install -v github.com/gwen001/gitlab-subdomains@latest && \
+    go install -v github.com/Josue87/gotator@latest && \
+    go install -v github.com/jaeles-project/gospider@latest && \
+    go install -v github.com/tomnomnom/unfurl@latest && \
+    go install -v github.com/OJ/gobuster/v3@latest && \
+    go install -v github.com/tomnomnom/anew@latest && \
+    go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest && \
+    go install -v github.com/projectdiscovery/mapcidr/cmd/mapcidr@latest && \
+    go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest && \
+    go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+
+# Clone and build massdns
+RUN git clone https://github.com/blechschmidt/massdns.git /massdns && \
+    cd /massdns && \
+    make
+
+# Clone and build puredns
+RUN git clone https://github.com/d3mondev/puredns /puredns && \
+    cd /puredns && \
+    go install
+
+# Clone Python tools
+RUN mkdir -p /python-tools && \
+    git clone https://github.com/UnaPibaGeek/ctfr.git /python-tools/ctfr && \
+    git clone https://github.com/pielco11/fav-up.git /python-tools/favup && \
+    git clone https://github.com/m4ll0k/SecretFinder.git /python-tools/secretfinder && \
+    git clone https://github.com/SpiderLabs/HostHunter.git /python-tools/hosthunter
+
+# Install Python tool dependencies
+RUN cd /python-tools/ctfr && pip3 install --break-system-packages -r requirements.txt || true && \
+    cd /python-tools/favup && pip3 install --break-system-packages -r requirements.txt || true && \
+    cd /python-tools/secretfinder && pip3 install --break-system-packages -r requirements.txt || true && \
+    cd /python-tools/hosthunter && pip3 install --break-system-packages -r requirements.txt || true
+
+# Stage 2: Final runtime image
+FROM python:3.11-alpine
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    nmap \
+    nmap-scripts \
+    git \
+    make \
+    libpcap \
+    ca-certificates
+
+# Create directories
+RUN mkdir -p /tools/bin /tools/python-tools
+
+# Copy Go binaries from builder
+COPY --from=go-builder /build/bin/* /tools/bin/
+
+# Copy massdns binary
+COPY --from=go-builder /massdns/bin/massdns /tools/bin/
+
+# Copy Python tools (entire directories with dependencies)
+COPY --from=go-builder /python-tools /tools/python-tools
+
+# Symlink system tools to /tools/bin
+RUN ln -s /usr/bin/nmap /tools/bin/nmap && \
+    ln -s /usr/bin/git /tools/bin/git && \
+    ln -s /usr/bin/make /tools/bin/make
+
+# Make all binaries executable
+RUN chmod +x /tools/bin/*
+
+# Keep container running
+CMD ["tail", "-f", "/dev/null"]
