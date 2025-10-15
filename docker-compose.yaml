@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  # Tools container - builds all security tools
+  tools:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.tools
+    container_name: recon-tools
+    volumes:
+      - tools_bin:/tools/bin
+      - tools_python:/tools/python-tools
+    command: tail -f /dev/null
+    restart: unless-stopped
+    networks:
+      - recon-network
+
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: recon-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - tools_bin:/tools/bin:ro
+      - tools_python:/tools/python-tools:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+      - ./app:/app/app:ro
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/recon.db
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    depends_on:
+      - tools
+    restart: unless-stopped
+    networks:
+      - recon-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+      target: development
+    container_name: recon-frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app:ro
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_WS_URL=ws://localhost:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - recon-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Mitmproxy for HTTP interception
+  mitmproxy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mitmproxy
+    container_name: recon-mitmproxy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/certs:/root/.mitmproxy
+      - ./data/wal:/app/wal
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/recon.db
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - recon-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  tools_bin:
+    name: recon_tools_bin
+  tools_python:
+    name: recon_tools_python
+
+networks:
+  recon-network:
+    name: recon-network
+    driver: bridge
