@@ -1,0 +1,41 @@
+# Stage 1: Builder - install Python dependencies
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install dependencies to user directory
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# Stage 2: Runtime
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy Python dependencies from builder
+COPY --from=builder /root/.local /root/.local
+
+# Copy application code
+COPY app ./app
+COPY main.py .
+COPY config ./config
+
+# Add tools to PATH and PYTHONPATH
+ENV PATH=/tools/bin:/tools/python-tools:/root/.local/bin:$PATH
+ENV PYTHONPATH=/tools/python-tools:$PYTHONPATH
+ENV PYTHONUNBUFFERED=1
+
+# Create necessary directories
+RUN mkdir -p data logs config
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+# Run application
+CMD ["python", "main.py", "--host", "0.0.0.0", "--port", "8000", "--no-reload"]

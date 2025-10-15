@@ -24,3 +24,10 @@ dist-ssr
 *.sw?
 .env
 recon_env
+.cursor
+.cursor/*
+__pycache__
+*/__pycache__
+
+# Worktrees
+.worktrees/
