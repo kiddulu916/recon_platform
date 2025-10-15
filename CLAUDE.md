@@ -12,6 +12,26 @@ Security Reconnaissance Platform - A comprehensive subdomain enumeration and rec
 
 ### Running the Application
 
+**Docker (Recommended):**
+
+The platform is fully containerized with Docker Compose for both development and production deployments.
+
+```bash
+# Development - Quick Start
+./scripts/dev-start.sh
+
+# Or manually
+docker-compose up --build
+
+# Access the platform:
+# - Frontend: http://localhost:5173
+# - Backend API: http://localhost:8000
+# - API Docs: http://localhost:8000/docs
+# - Mitmproxy: http://localhost:8080
+```
+
+**Traditional (Python Virtual Environment):**
+
 ```bash
 # Activate virtual environment
 source recon_env/bin/activate  # On Windows: recon_env\Scripts\activate
@@ -22,12 +42,17 @@ python main.py
 
 The application starts on `http://localhost:8000` with interactive API docs at `/docs`.
 
+**See the [Docker Deployment](#docker-deployment) section below for comprehensive containerized deployment guide.**
+
 ### Database Migrations
 
 The platform uses SQLAlchemy with async support. Database is auto-initialized on startup.
 
 ### Installing External Tools
 
+**Docker:** Tools are pre-installed in the tools container. No manual installation needed.
+
+**Traditional:**
 ```bash
 # After starting the application
 curl -X POST http://localhost:8000/api/tools/install
@@ -37,6 +62,527 @@ curl http://localhost:8000/api/tools/status
 ```
 
 Required external tools include subfinder, assetfinder, naabu, httpx, dnsx, mapcidr, puredns, gotator, and others.
+
+## Docker Deployment
+
+The platform is fully containerized using Docker Compose with a multi-container architecture optimized for both development and production environments.
+
+### Architecture Overview
+
+**Multi-Container Architecture:**
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Frontend   │────▶│   Backend   │────▶│  PostgreSQL │
+│   (React)   │     │  (FastAPI)  │     │ (prod only) │
+│  Port 5173  │     │  Port 8000  │     │  Port 5432  │
+└─────────────┘     └──────┬──────┘     └─────────────┘
+                           │
+                    ┌──────┴──────┬─────────────┐
+                    ▼             ▼             ▼
+              ┌──────────┐  ┌──────────┐ ┌──────────┐
+              │  Tools   │  │ mitmproxy│ │ SQLite   │
+              │Container │  │Port 8080 │ │(dev only)│
+              └──────────┘  └──────────┘ └──────────┘
+```
+
+**Container Descriptions:**
+
+| Container | Purpose | Ports | Base Image |
+|-----------|---------|-------|------------|
+| **tools** | Pre-built security tools (20+ Go/Python/C tools) | - | golang:1.21-alpine → python:3.11-alpine |
+| **backend** | FastAPI application server | 8000 | python:3.11-slim |
+| **frontend** | React UI with Vite (dev) or Nginx (prod) | 5173 | node:20-alpine (dev), nginx:alpine (prod) |
+| **mitmproxy** | HTTP/HTTPS traffic interception | 8080 | python:3.11-slim |
+| **postgres** | PostgreSQL database (production only) | 5432 (internal) | postgres:16-alpine |
+
+### Quick Start - Development
+
+```bash
+# 1. Clone repository (if not already done)
+git clone <repository-url>
+cd recon
+
+# 2. Start all services
+./scripts/dev-start.sh
+
+# Or manually:
+docker-compose up --build
+
+# 3. Access the platform
+# - Frontend: http://localhost:5173
+# - Backend API: http://localhost:8000
+# - API Docs: http://localhost:8000/docs
+# - Mitmproxy: http://localhost:8080
+```
+
+**Development Features:**
+- Hot reload for backend and frontend code changes
+- SQLite database (no separate database container needed)
+- Bind mounts for easy access to logs, data, and config
+- Pre-installed security tools in shared volume
+
+### Quick Start - Production
+
+```bash
+# 1. Create production environment file
+cp .env.production.example .env.production
+
+# 2. Generate secure credentials
+DB_PASSWORD=$(openssl rand -base64 32)
+JWT_SECRET=$(openssl rand -base64 64)
+
+# 3. Edit .env.production with your secrets
+nano .env.production
+# Set DB_PASSWORD and JWT_SECRET_KEY
+
+# 4. Secure environment file
+chmod 600 .env.production
+
+# 5. Start production services
+./scripts/prod-start.sh
+
+# Or manually:
+docker-compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d --build
+
+# 6. Install security tools (first time only)
+docker-compose exec backend python main.py --install-tools
+```
+
+**Production Features:**
+- PostgreSQL database with persistent storage
+- Nginx-served frontend with optimized build
+- Docker volumes for data persistence
+- Resource limits and health checks
+- Log rotation and monitoring
+
+### Container Details
+
+**Tools Container:**
+- **Purpose:** Pre-built container with all security tools installed
+- **Tools Included:**
+  - Go Tools (15): subfinder, assetfinder, httpx, naabu, dnsx, mapcidr, gotator, gospider, unfurl, gobuster, anew, gau, waybackurls, github-subdomains, gitlab-subdomains
+  - Python Tools (4): ctfr, favup, secretfinder, hosthunter
+  - C Tools (1): massdns
+  - System Tools: nmap, git, make
+- **Volume Sharing:** Tools shared with backend via `/tools/bin` and `/tools/python-tools`
+- **Build Time:** ~15-20 minutes first build, cached afterwards
+
+**Backend Container:**
+- **Purpose:** FastAPI application server with async support
+- **Features:**
+  - Multi-stage build for efficient image size
+  - Tools available via shared volumes
+  - Health check on `/health` endpoint
+  - Structured logging with rotation
+- **Environment:** `PATH` and `PYTHONPATH` configured to access tools
+
+**Frontend Container:**
+- **Development:** Vite dev server with hot module replacement
+- **Production:** Nginx serving optimized static build with gzip compression and security headers
+
+**Mitmproxy Container:**
+- **Purpose:** HTTP/HTTPS traffic interception and vulnerability detection
+- **Features:**
+  - Custom interceptor addon for pattern matching
+  - Write-Ahead Log (WAL) for resilience
+  - Real-time vulnerability detection
+- **Certificates:** Auto-generated on first run, stored in `./data/certs` (dev) or volume (prod)
+
+**PostgreSQL Container (Production Only):**
+- **Version:** PostgreSQL 16 Alpine
+- **Configuration:** User `recon`, database `recon`, password from `DB_PASSWORD` env var
+- **Health Check:** Automatic with `pg_isready`
+
+### Volume Management
+
+**Development (Bind Mounts):**
+```yaml
+./data   → /app/data    # SQLite DB, API keys, certs
+./logs   → /app/logs    # Application logs
+./config → /app/config  # Configuration files
+```
+
+**Production (Docker Volumes):**
+```yaml
+recon_postgres_data     # PostgreSQL data
+recon_backend_data      # Application data
+recon_backend_logs      # Logs
+recon_mitmproxy_certs   # SSL certificates
+recon_mitmproxy_wal     # Traffic WAL
+```
+
+**Shared (All Environments):**
+```yaml
+recon_tools_bin         # Shared Go/C tool binaries
+recon_tools_python      # Shared Python tools
+```
+
+### Helper Scripts
+
+**Development Start:**
+```bash
+./scripts/dev-start.sh
+# - Checks for .env file, creates from .env.example if missing
+# - Starts all services with docker-compose up --build
+# - Displays access URLs
+```
+
+**Production Start:**
+```bash
+./scripts/prod-start.sh
+# - Validates .env.production exists
+# - Checks required environment variables (DB_PASSWORD, JWT_SECRET_KEY)
+# - Sets proper permissions on .env.production
+# - Starts services with production overrides
+# - Displays health status and next steps
+```
+
+**Backup:**
+```bash
+./scripts/backup.sh
+# Creates timestamped backups in ./backups/:
+# - PostgreSQL: postgres_YYYYMMDD_HHMMSS.sql (SQL dump)
+# - SQLite: recon_YYYYMMDD_HHMMSS.db (file copy)
+# - Volumes: postgres_data_YYYYMMDD_HHMMSS.tar.gz
+# - Logs/Config: logs_config_YYYYMMDD_HHMMSS.tar.gz
+```
+
+**Restore:**
+```bash
+./scripts/restore.sh <timestamp>
+# Example: ./scripts/restore.sh 20251014_120000
+# - Lists available backups if no timestamp provided
+# - Stops affected services
+# - Restores database from backup
+# - Restarts services
+```
+
+### Environment Configuration
+
+**Development (.env):**
+- SQLite database: `DATABASE_URL=sqlite+aiosqlite:///./data/recon.db`
+- Relaxed security for local testing
+- Hot reload enabled
+
+**Production (.env.production):**
+- PostgreSQL database: `DATABASE_URL=postgresql+asyncpg://recon:${DB_PASSWORD}@postgres:5432/recon`
+- Strong credentials required
+- Resource limits enforced
+- Log rotation configured
+
+**Required Environment Variables:**
+```bash
+# Security (REQUIRED)
+JWT_SECRET_KEY=<strong-random-string>   # Generate with: openssl rand -base64 64
+DB_PASSWORD=<strong-password>           # Generate with: openssl rand -base64 32
+
+# Database
+DATABASE_URL=<connection-string>
+
+# Scanning Configuration
+SCAN_PROFILE=normal                     # passive, normal, or aggressive
+GLOBAL_RATE_LIMIT=50
+DOMAIN_RATE_LIMIT=20
+
+# Feature Toggles
+ENABLE_WEB_DISCOVERY=true
+ENABLE_RECURSION=true
+ENABLE_PATTERN_RECOGNITION=true
+```
+
+### Common Docker Operations
+
+**View Logs:**
+```bash
+# All services
+docker-compose logs -f
+
+# Specific service
+docker-compose logs -f backend
+
+# Last 100 lines
+docker-compose logs -f --tail=100
+```
+
+**Execute Commands:**
+```bash
+# Check tool status
+docker-compose exec backend python main.py --check-tools
+
+# Access backend shell
+docker-compose exec backend bash
+
+# Run database migrations (if needed)
+docker-compose exec backend python -c "from app.core.database import DatabaseManager; import asyncio; asyncio.run(DatabaseManager.initialize())"
+
+# PostgreSQL console (production)
+docker-compose exec postgres psql -U recon recon
+```
+
+**Restart Services:**
+```bash
+# Restart specific service
+docker-compose restart backend
+
+# Restart all services
+docker-compose restart
+
+# Stop all services
+docker-compose down
+
+# Stop and remove volumes (WARNING: deletes data!)
+docker-compose down -v
+```
+
+**Resource Monitoring:**
+```bash
+# View resource usage
+docker stats
+
+# Check service health
+docker-compose ps
+
+# Comprehensive health check
+curl http://localhost:8000/api/health/comprehensive | jq
+```
+
+**Cleanup:**
+```bash
+# Remove stopped containers
+docker-compose down
+
+# Remove images
+docker-compose down --rmi all
+
+# Remove volumes (WARNING: deletes data!)
+docker-compose down -v
+
+# Full Docker cleanup
+docker system prune -a --volumes
+```
+
+### Troubleshooting Docker Issues
+
+**Port Conflicts:**
+```bash
+# Error: "port is already allocated"
+# Solution: Change port mapping in docker-compose.yaml or stop conflicting service
+sudo lsof -i :8000  # Find process using port 8000
+docker-compose down  # Stop containers
+# Edit docker-compose.yaml to change port mapping
+```
+
+**Tools Not Accessible in Backend:**
+```bash
+# Verify tools container is running
+docker-compose ps tools
+
+# Check tools are built
+docker-compose exec tools ls -la /tools/bin
+
+# Check backend can see tools
+docker-compose exec backend ls -la /tools/bin
+
+# Check PATH includes tools
+docker-compose exec backend echo $PATH
+
+# Rebuild tools container if needed
+docker-compose build --no-cache tools
+docker-compose restart backend
+```
+
+**Volume Permission Issues:**
+```bash
+# Error: "permission denied" when accessing ./data or ./logs
+# Solution: Fix ownership on host
+sudo chown -R $USER:$USER ./data ./logs ./config
+
+# Or run containers with your UID (add to docker-compose.yaml)
+user: "${UID}:${GID}"
+```
+
+**Database Connection Issues:**
+
+**Development (SQLite):**
+```bash
+# Check database file exists
+ls -la ./data/recon.db
+
+# Check permissions
+chmod 644 ./data/recon.db
+
+# Verify DATABASE_URL
+docker-compose exec backend env | grep DATABASE_URL
+```
+
+**Production (PostgreSQL):**
+```bash
+# Check postgres is healthy
+docker-compose ps postgres
+
+# Test connection from backend
+docker-compose exec backend python -c "
+from sqlalchemy import create_engine, text
+import os
+engine = create_engine(os.getenv('DATABASE_URL'))
+with engine.connect() as conn:
+    result = conn.execute(text('SELECT version()'))
+    print(result.fetchone())
+"
+
+# Check logs
+docker-compose logs postgres
+```
+
+**Container Health Check Failures:**
+```bash
+# Check health status
+docker-compose ps
+
+# View health check logs
+docker inspect --format='{{json .State.Health}}' recon-backend | jq
+
+# Common fixes:
+# - Ensure ports are accessible
+# - Check application is starting correctly
+# - Verify dependencies are healthy
+# - Review container logs for errors
+```
+
+**Out of Memory:**
+```bash
+# Check current usage
+docker stats
+
+# Increase Docker Desktop memory (macOS/Windows):
+# Docker Desktop → Settings → Resources → Memory
+
+# Adjust resource limits in docker-compose.prod.yaml:
+deploy:
+  resources:
+    limits:
+      memory: 4G  # Increase as needed
+```
+
+**Build Failures:**
+```bash
+# Clear Docker cache
+docker builder prune -a
+
+# Remove old images
+docker-compose down --rmi all
+
+# Check disk space
+df -h
+docker system df
+
+# Rebuild from scratch
+docker-compose build --no-cache
+
+# If tools container fails (common due to network issues):
+# Retry the build - Go tool downloads can timeout
+docker-compose build --no-cache tools
+```
+
+**Frontend Can't Reach Backend:**
+```bash
+# Check environment variables
+docker-compose exec frontend env | grep VITE
+
+# Should be:
+# Development: VITE_API_URL=http://localhost:8000
+# Production: VITE_API_URL=http://backend:8000
+
+# Verify containers are on same network
+docker network inspect recon-network
+
+# Test connectivity
+docker-compose exec frontend wget -O- http://backend:8000/health
+```
+
+**Logs Too Large:**
+```bash
+# Already configured with log rotation in docker-compose files
+# Default: max-size: "10m", max-file: "3"
+
+# Manual cleanup if needed
+docker-compose down
+docker system prune -a --volumes
+
+# Or truncate specific container logs
+: > $(docker inspect --format='{{.LogPath}}' recon-backend)
+```
+
+**Mitmproxy Certificate Issues:**
+```bash
+# Regenerate certificates
+rm -rf ./data/certs/*
+docker-compose restart mitmproxy
+
+# Certificates regenerated at: ./data/certs/mitmproxy-ca-cert.pem
+
+# Install CA certificate system-wide for HTTPS interception
+docker-compose exec mitmproxy cat /root/.mitmproxy/mitmproxy-ca-cert.pem > mitmproxy-ca.pem
+
+# Ubuntu/Debian:
+sudo cp mitmproxy-ca.pem /usr/local/share/ca-certificates/mitmproxy-ca.crt
+sudo update-ca-certificates
+
+# macOS:
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain mitmproxy-ca.pem
+```
+
+### Production Best Practices
+
+**Security:**
+- Never commit `.env.production` to git
+- Use strong passwords: `openssl rand -base64 32`
+- Set file permissions: `chmod 600 .env.production`
+- Rotate secrets regularly
+- Keep Docker images updated: `docker-compose pull`
+
+**Backups:**
+- Schedule daily backups: `0 2 * * * cd /path/to/recon && ./scripts/backup.sh`
+- Keep 7 daily, 4 weekly, 12 monthly backups
+- Store backups off-server (S3, rsync to remote server, etc.)
+- Test restore procedure monthly
+
+**Monitoring:**
+- Check logs regularly: `docker-compose logs`
+- Monitor disk usage: `df -h && docker system df`
+- Monitor container health: `docker-compose ps`
+- Set up alerting for container failures
+
+**Updates:**
+```bash
+# Pull latest code
+git pull
+
+# Rebuild and restart services
+docker-compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d --build
+
+# Check for issues
+docker-compose logs -f
+```
+
+**Resource Limits:**
+- Production configurations include CPU/memory limits
+- Adjust in `docker-compose.prod.yaml` based on your server capacity
+- Default limits:
+  - Backend: 4 CPUs, 4GB RAM
+  - PostgreSQL: 2 CPUs, 2GB RAM
+  - Frontend: 1 CPU, 512MB RAM
+  - Mitmproxy: 2 CPUs, 1GB RAM
+  - Tools: 1 CPU, 512MB RAM
+
+### Additional Resources
+
+- **Comprehensive Deployment Guide:** `docs/DOCKER_DEPLOYMENT.md`
+- **Docker Compose Files:** `docker-compose.yaml` (base), `docker-compose.prod.yaml` (production overrides)
+- **Dockerfiles:** `docker/` directory
+- **Helper Scripts:** `scripts/` directory
+- **Environment Templates:** `.env.example`, `.env.production.example`
 
 ## Architecture
 
@@ -1465,6 +2011,118 @@ pytest tests/
 
 ## Common Issues
 
+### Docker Issues
+
+**Port already allocated**:
+```bash
+# Error: "Bind for 0.0.0.0:8000 failed: port is already allocated"
+# Find process using the port
+sudo lsof -i :8000
+
+# Stop conflicting service or change port in docker-compose.yaml
+docker-compose down
+# Edit docker-compose.yaml port mapping: "8001:8000"
+```
+
+**Tools not found in backend container**:
+```bash
+# Verify tools container built successfully
+docker-compose ps tools
+docker-compose exec tools ls -la /tools/bin
+
+# Check backend can access tools
+docker-compose exec backend ls -la /tools/bin
+docker-compose exec backend which subfinder
+
+# Rebuild if needed
+docker-compose build --no-cache tools
+docker-compose restart backend
+```
+
+**Volume permission denied**:
+```bash
+# Fix ownership on host
+sudo chown -R $USER:$USER ./data ./logs ./config
+
+# Or set proper permissions
+chmod -R 755 ./data ./logs ./config
+```
+
+**Database connection failed (PostgreSQL)**:
+```bash
+# Check postgres container health
+docker-compose ps postgres
+
+# Test connection from backend
+docker-compose exec backend python -c "
+from sqlalchemy import create_engine, text
+import os
+engine = create_engine(os.getenv('DATABASE_URL'))
+with engine.connect() as conn:
+    print(conn.execute(text('SELECT version()')).fetchone())
+"
+
+# Check logs for errors
+docker-compose logs postgres
+```
+
+**Container build failures**:
+```bash
+# Clear Docker cache
+docker builder prune -a
+
+# Remove old images
+docker-compose down --rmi all
+
+# Check disk space
+df -h
+docker system df
+
+# Rebuild from scratch
+docker-compose build --no-cache
+
+# For tools container network timeouts (common):
+# Retry build - Go tool downloads can timeout
+docker-compose build --no-cache tools
+```
+
+**Out of memory**:
+```bash
+# Check resource usage
+docker stats
+
+# Increase Docker Desktop memory:
+# Docker Desktop → Settings → Resources → Memory → 8GB+
+
+# Or adjust limits in docker-compose.prod.yaml
+```
+
+**Frontend can't reach backend**:
+```bash
+# Verify environment variables
+docker-compose exec frontend env | grep VITE
+
+# Should be:
+# Dev: VITE_API_URL=http://localhost:8000
+# Prod: VITE_API_URL=http://backend:8000
+
+# Test network connectivity
+docker-compose exec frontend wget -O- http://backend:8000/health
+```
+
+**Logs consuming too much disk space**:
+```bash
+# Already configured with rotation (10MB max, 3 files)
+# Manual cleanup if needed:
+docker-compose down
+docker system prune -a
+
+# Or truncate specific logs
+: > $(docker inspect --format='{{.LogPath}}' recon-backend)
+```
+
+### Traditional Deployment Issues
+
 **Tool not found in PATH**:
 - Ensure Go tools installed: `export PATH=$PATH:$GOPATH/bin`
 - Check tool status: `curl http://localhost:8000/api/tools/status`
@@ -1474,9 +2132,9 @@ pytest tests/
 sudo setcap cap_net_raw+ep $(which naabu)
 ```
 
-**Database locked errors**:
+**Database locked errors (SQLite)**:
 - SQLite has limited concurrency
-- Use PostgreSQL for production: `DATABASE_URL=postgresql+asyncpg://user:pass@host/db`
+- For production, use PostgreSQL with Docker: `docker-compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d`
 
 **Rate limiting errors**:
 - Reduce to `passive` or `normal` profile
